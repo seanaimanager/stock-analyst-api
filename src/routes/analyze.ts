@@ -139,4 +139,74 @@ router.post('/analyze', async (req: Request, res: Response) => {
   }
 });
 
+// Non-streaming endpoint for React Native clients
+router.post('/analyze-sync', async (req: Request, res: Response) => {
+  const parsed = analyzeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: parsed.error.flatten() });
+    return;
+  }
+
+  const { ticker, bias, riskAppetite, timeframe } = parsed.data;
+
+  let fullText = '';
+  let currentPrice: number | null = null;
+  let phase2Raw = '';
+  const phases: Array<{ phase: number; title: string; raw: string }> = [];
+
+  try {
+    await streamAnalysis(
+      { ticker, bias, riskAppetite, timeframe },
+      (text: string) => {
+        fullText += text;
+      },
+      (_name: string) => {},
+      async () => {}
+    );
+
+    // Parse phases from full text
+    let remaining = fullText;
+    let result = detectPhaseBoundary(remaining);
+    while (result.completedPhase) {
+      const phase = result.completedPhase;
+      phases.push({ phase: phase.phase, title: phase.title, raw: phase.raw });
+      if (phase.phase === 1) currentPrice = extractCurrentPrice(phase.raw);
+      if (phase.phase === 2) phase2Raw = phase.raw;
+      remaining = result.remainder;
+      result = detectPhaseBoundary(remaining);
+    }
+
+    // Check for a final phase in remaining buffer
+    if (remaining.trim()) {
+      const lastPhaseMatch = remaining.match(/## Phase (\d+)[:\s—\-]+(.+?)(?:\n|$)/);
+      if (lastPhaseMatch) {
+        const phaseNum = parseInt(lastPhaseMatch[1], 10);
+        phases.push({ phase: phaseNum, title: lastPhaseMatch[2].trim(), raw: remaining.trim() });
+        if (phaseNum === 1) currentPrice = extractCurrentPrice(remaining);
+        if (phaseNum === 2) phase2Raw = remaining;
+      }
+    }
+
+    // Generate chart
+    let chartFilename: string | null = null;
+    if (phase2Raw) {
+      try {
+        const chartParams = extractChartParams(phase2Raw, currentPrice || undefined);
+        if (chartParams) {
+          chartFilename = await generateChart(ticker, chartParams);
+        }
+      } catch (_err) {}
+    }
+
+    res.json({
+      ticker,
+      phases,
+      chartUrl: chartFilename ? `/chart/${chartFilename}` : null,
+      fullText,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || 'Analysis failed' });
+  }
+});
+
 export default router;
