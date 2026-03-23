@@ -1,8 +1,17 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { STOCK_ANALYST_PROMPT, buildUserMessage } from '../prompts/analyst.js';
 import type { AnalyzeRequest } from '../types/analysis.js';
 
-const client = new Anthropic();
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '');
+
+const model = genAI.getGenerativeModel({
+  model: 'gemini-2.5-flash',
+  systemInstruction: STOCK_ANALYST_PROMPT,
+  generationConfig: {
+    maxOutputTokens: 16000,
+  },
+  tools: [{ googleSearch: {} } as any],
+});
 
 export async function streamAnalysis(
   request: AnalyzeRequest,
@@ -17,29 +26,16 @@ export async function streamAnalysis(
     request.timeframe
   );
 
-  const stream = await client.messages.stream({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 16000,
-    system: STOCK_ANALYST_PROMPT,
-    tools: [
-      {
-        type: 'web_search_20250305',
-        name: 'web_search',
-        max_uses: 10,
-      } as any,
-    ],
-    messages: [{ role: 'user', content: userMessage }],
-  });
+  const result = await model.generateContentStream(userMessage);
 
-  for await (const event of stream) {
-    if (event.type === 'content_block_delta') {
-      if (event.delta.type === 'text_delta') {
-        onText(event.delta.text);
-      }
-    } else if (event.type === 'content_block_start') {
-      if (event.content_block.type === 'tool_use') {
-        onToolUse(event.content_block.name);
-      }
+  for await (const chunk of result.stream) {
+    const text = chunk.text();
+    if (text) {
+      onText(text);
+    }
+    // Check for grounding/search usage
+    if (chunk.candidates?.[0]?.groundingMetadata) {
+      onToolUse('google_search');
     }
   }
 
